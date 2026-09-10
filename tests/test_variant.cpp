@@ -387,3 +387,120 @@ TEST_F(VariantInstallTest, ForeignTargetPackagesAreStillRefused) {
         EXPECT_FALSE(fs::exists(uiPluginsDir / c.pkg));
     }
 }
+
+// =============================================================================
+// Mobile and web hosts
+//
+// Same table, three more targets. The store shell is where the "one vocabulary"
+// claim gets tested: lgpm computes nothing itself -- currentPlatformVariant()
+// is liblgx's answer for the build -- so these rows pin that the accept list a
+// phone builds is the one the package format promises, and that widening it
+// for mobile did not open a hole between targets.
+// =============================================================================
+
+namespace {
+const VariantAliasCase kMobileAliasCases[] = {
+    { "android-arm64",   "android-aarch64" },
+    { "android-x86_64",  "android-amd64"   },
+    { "ios-arm64",       "ios-aarch64"     },
+    { "ios-sim-arm64",   "ios-sim-aarch64" },
+};
+} // namespace
+
+TEST(VariantTest, EveryMobileTargetAcceptsBothArchSpellings) {
+    for (const auto& c : kMobileAliasCases) {
+        ScopedPlatformOverride guard(c.host);
+        auto variants = PackageManagerLib::platformVariantsToTry();
+        EXPECT_TRUE(accepts(variants, c.host))
+            << "host " << c.host << " does not accept its own spelling; got " << join(variants);
+        EXPECT_TRUE(accepts(variants, c.alsoAccepted))
+            << "host " << c.host << " does not accept producer spelling "
+            << c.alsoAccepted << "; got " << join(variants);
+    }
+}
+
+TEST(VariantTest, AnIosHostSelectsItsOwnVariantAndNothingAdjacent) {
+    // The acceptance criterion, as a list: a host reporting ios-arm64 leads
+    // with ios-arm64, tolerates the aarch64 spelling of it, and reaches for
+    // neither the simulator slice nor the Mac one nor a web payload.
+    ScopedPlatformOverride guard("ios-arm64");
+    auto variants = PackageManagerLib::platformVariantsToTry();
+    ASSERT_FALSE(variants.empty());
+    EXPECT_EQ(variants.front().rfind("ios-arm64", 0), 0u) << join(variants);
+    EXPECT_TRUE(accepts(variants, "ios-aarch64")) << join(variants);
+    for (const char* foreign : { "ios-sim-arm64", "darwin-arm64", "android-arm64", "web" }) {
+        EXPECT_FALSE(accepts(variants, foreign))
+            << "ios-arm64 host accepted " << foreign << "; got " << join(variants);
+    }
+}
+
+TEST(VariantTest, NoNativeHostReachesForTheWebVariant) {
+    // A web payload needs the Web container. A host without one selecting it
+    // would install JavaScript where it loads a plugin.
+    for (const char* host : { "darwin-arm64", "linux-x86_64", "windows-x86_64",
+                              "android-arm64", "ios-arm64", "ios-sim-arm64" }) {
+        ScopedPlatformOverride guard(host);
+        auto variants = PackageManagerLib::platformVariantsToTry();
+        EXPECT_FALSE(accepts(variants, "web")) << host << " -> " << join(variants);
+    }
+}
+
+TEST(VariantTest, AndroidIsNotLinuxAndTheSimulatorIsNotTheDevice) {
+    struct { const char* host; const char* foreign; } cases[] = {
+        { "android-arm64",  "linux-arm64"    },
+        { "android-arm64",  "linux-aarch64"  },
+        { "linux-arm64",    "android-arm64"  },
+        { "ios-arm64",      "ios-sim-arm64"  },
+        { "ios-sim-arm64",  "ios-arm64"      },
+        { "ios-sim-arm64",  "darwin-arm64"   },
+        { "darwin-arm64",   "ios-arm64"      },
+    };
+    for (const auto& c : cases) {
+        ScopedPlatformOverride guard(c.host);
+        auto variants = PackageManagerLib::platformVariantsToTry();
+        EXPECT_FALSE(accepts(variants, c.foreign))
+            << "host " << c.host << " accepted " << c.foreign << "; got " << join(variants);
+    }
+}
+
+TEST_F(VariantInstallTest, AnIosHostInstallsTheIosPackage) {
+    auto lgxPath = createPackageAsProducedBy("ios_pkg", "ios-arm64");
+    ASSERT_FALSE(lgxPath.empty());
+
+    ScopedPlatformOverride host("ios-arm64");
+    auto pm = createPM();
+    std::string errorMsg;
+    std::string result = pm.installPluginFile(lgxPath.string(), errorMsg);
+    ASSERT_FALSE(result.empty()) << errorMsg;
+    EXPECT_TRUE(fs::exists(fs::path(result) / "ios_pkg")) << result;
+}
+
+TEST_F(VariantInstallTest, AMobileHostRefusesAForeignTargetAndNamesWhatThePackageHas) {
+    // The refusal has to be actionable on a device, where nobody can open the
+    // .lgx to see what is inside: the message names the variants the package
+    // actually provides, not just the one that was wanted.
+    struct { const char* pkg; const char* producer; const char* host; } cases[] = {
+        { "sim_on_device",  "ios-sim-arm64", "ios-arm64"     },
+        { "device_on_sim",  "ios-arm64",     "ios-sim-arm64" },
+        { "mac_on_device",  "darwin-arm64",  "ios-arm64"     },
+        { "linux_on_droid", "linux-arm64",   "android-arm64" },
+        { "web_on_device",  "web",           "ios-arm64"     },
+    };
+    for (const auto& c : cases) {
+        auto lgxPath = createPackageAsProducedBy(c.pkg, c.producer);
+        ASSERT_FALSE(lgxPath.empty()) << c.pkg;
+
+        ScopedPlatformOverride host(c.host);
+        auto pm = createPM();
+        std::string errorMsg;
+        std::string result = pm.installPluginFile(lgxPath.string(), errorMsg);
+        EXPECT_TRUE(result.empty())
+            << c.producer << " package was installed on host " << c.host;
+        EXPECT_NE(errorMsg.find("variant"), std::string::npos) << errorMsg;
+        // The variant the package carries, named in the failure.
+        EXPECT_NE(errorMsg.find(c.producer), std::string::npos)
+            << "error does not name the variant the package provides: " << errorMsg;
+        EXPECT_FALSE(fs::exists(modulesDir / c.pkg));
+        EXPECT_FALSE(fs::exists(uiPluginsDir / c.pkg));
+    }
+}
