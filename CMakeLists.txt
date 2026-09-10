@@ -35,7 +35,12 @@ set(LIB_SOURCES
 )
 
 # Create the shared library
-add_library(package_manager_lib SHARED ${LIB_SOURCES})
+option(LGPM_STATIC_LIB "Build package_manager_lib as a static archive" OFF)
+set(LGPM_LIB_TYPE SHARED)
+if(LGPM_STATIC_LIB)
+    set(LGPM_LIB_TYPE STATIC)
+endif()
+add_library(package_manager_lib ${LGPM_LIB_TYPE} ${LIB_SOURCES})
 
 # The C API in src/lgpm.h is explicitly __declspec(dllexport)-ed, and GNU ld
 # disables PE auto-export for the ENTIRE image as soon as any symbol is
@@ -89,7 +94,7 @@ set_target_properties(package_manager_lib PROPERTIES
     SKIP_BUILD_RPATH FALSE
 )
 
-if(APPLE)
+if(APPLE AND NOT LGPM_STATIC_LIB)
     set_target_properties(package_manager_lib PROPERTIES
         INSTALL_RPATH "@loader_path;${LGX_ROOT}/lib"
         INSTALL_NAME_DIR "@rpath"
@@ -115,7 +120,9 @@ set_target_properties(package_manager_lib PROPERTIES
 )
 
 # CLI executable
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
 add_subdirectory(cmd)
+endif()
 
 # Testing (optional)
 option(LGPM_BUILD_TESTS "Build tests" OFF)
