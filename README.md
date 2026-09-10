@@ -74,7 +74,11 @@ if (users) std::vector<DependentTreeNode>  allUsers  = users->flatten();
 #include <nlohmann/json.hpp>
 std::string modulesJson = nlohmann::json(modules).dump(2);
 
-// Platform variant helpers
+// Platform variant helpers. The vocabulary and the fallback order are
+// logos-package's — a variant name is a key in the signed hash tree, so lgpm
+// asks liblgx rather than tabulating its own. Desktop, mobile (android-arm64,
+// android-x86_64, ios-arm64, ios-sim-arm64) and web are one table; see
+// logos-package docs/spec.md § Platform Variant Vocabulary.
 std::string variant = PackageManagerLib::currentPlatformVariant();     // e.g. "darwin-arm64"
 std::vector<std::string> variants = PackageManagerLib::platformVariantsToTry(); // ordered fallback list
 
