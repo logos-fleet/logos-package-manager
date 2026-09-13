@@ -854,13 +854,16 @@ static std::map<std::string, ScanEntry> enumerateManifests(
             // agree so a relative --modules-dir does not yield one of each.
             const std::string installedVariant = readInstalledVariant(entry.path());
             {
-                std::vector<std::string> mainVariants = variants;
-                if (!installedVariant.empty()) {
-                    // The recorded name AND its build-suffix-free form: the
-                    // sidecar records what was unpacked, and a `-dev` build
-                    // writes a directory the published manifest spells without
-                    // the suffix.
-                    mainVariants = { installedVariant };
+                // The recorded name AND its build-suffix-free form: the sidecar
+                // records what was unpacked, and a `-dev` build writes a
+                // directory the published manifest spells without the suffix.
+                // With nothing recorded, this host's native list is the
+                // fallback.
+                std::vector<std::string> mainVariants;
+                if (installedVariant.empty()) {
+                    mainVariants = variants;
+                } else {
+                    mainVariants.push_back(installedVariant);
                     const std::string bare = variantWithoutDevSuffix(installedVariant);
                     if (bare != installedVariant)
                         mainVariants.push_back(bare);
