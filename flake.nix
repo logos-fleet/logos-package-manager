@@ -51,17 +51,16 @@
       iosBuildSystem = "aarch64-darwin";
       iosTargets = [ "aarch64-ios" "aarch64-ios-simulator" ];
       mobileLibs = nixpkgs.lib.genAttrs iosTargets (target:
-        let pkgs = logos-nix.lib.mkIosPkgs { inherit target; buildSystem = iosBuildSystem; }; in
+        let
+          pkgs = logos-nix.lib.mkIosPkgs { inherit target; buildSystem = iosBuildSystem; };
+          lgx = logos-package.legacyPackages.${iosBuildSystem}.mobile.${target}.lib;
+        in
         {
           lib = import ./nix/mobile-ios.nix {
-            inherit pkgs;
+            inherit pkgs lgx;
             src = ./.;
             # A string; nothing else in the desktop common config is touched.
-            inherit (import ./nix/default.nix {
-              inherit pkgs;
-              logosPackageLib = logos-package.legacyPackages.${iosBuildSystem}.mobile.${target}.lib;
-            }) version;
-            lgx = logos-package.legacyPackages.${iosBuildSystem}.mobile.${target}.lib;
+            inherit (import ./nix/default.nix { inherit pkgs; logosPackageLib = lgx; }) version;
           };
         });
     in
