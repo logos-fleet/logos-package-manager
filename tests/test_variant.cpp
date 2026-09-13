@@ -607,6 +607,47 @@ TEST_F(WebVariantInstallTest, AWebVariantIsTheCoresToDiscoverWhateverItsType) {
         << installedPath;
 }
 
+TEST_F(WebVariantInstallTest, AnInstalledWebVariantIsFoundByTheScanWithItsEntryPoint) {
+    // THE OTHER HALF OF THE INSTALL, and the one that decides whether anything
+    // ever runs. installPluginFile puts a `web` variant in the modules
+    // directory so the core can DISCOVER it -- and discovery is
+    // getInstalledPackages(), which resolves each manifest's `main` before it
+    // reports the package at all: a row with no main file is dropped by the
+    // caller (liblogos' ModuleRegistry skips `mainFilePath.empty()`).
+    //
+    // `main` is a per-variant map, and this host's native variant is
+    // ios-sim-arm64. Resolved against THAT the web package answers "no main",
+    // so the install succeeded, the files landed in the directory the core
+    // scans, and the module was invisible -- with no error anywhere. Measured
+    // on an iPad simulator, 2026-09-13.
+    //
+    // The variant that was EXTRACTED here is the one `main` has to resolve
+    // against, and installPluginFile already records it in the `variant`
+    // sidecar beside the manifest.
+    auto lgxPath = createWebPackage("web_scanned");
+    ASSERT_FALSE(lgxPath.empty());
+
+    ScopedPlatformOverride host("ios-sim-arm64");
+    auto pm = createPM();
+    pm.setInstallVariants({ "web" });
+
+    std::string errorMsg;
+    ASSERT_FALSE(pm.installPluginFile(lgxPath.string(), errorMsg).empty()) << errorMsg;
+
+    // A SECOND instance, with no declaration at all -- which is what the core's
+    // own PackageManagerLib is. Nothing tells it the shell installs `web`
+    // variants, and it must find the package all the same.
+    PackageManagerLib scanner;
+    scanner.setUserModulesDirectory(modulesDir.string());
+    bool found = false;
+    for (const auto& pkg : scanner.getInstalledPackages()) {
+        if (pkg.name != "web_scanned") continue;
+        found = true;
+        EXPECT_EQ(pkg.mainFilePath, (modulesDir / "web_scanned" / "index.html").string());
+    }
+    EXPECT_TRUE(found) << "the scan did not report the installed web package at all";
+}
+
 TEST_F(WebVariantInstallTest, WithoutTheDeclarationAWebPackageIsStillRefused) {
     // The default is unchanged and stays unchanged: a host that did not say it
     // has a container does not get one.

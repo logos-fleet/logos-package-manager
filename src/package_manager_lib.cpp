@@ -824,12 +824,51 @@ static std::map<std::string, ScanEntry> enumerateManifests(
             scan.version = manifest.value("version", "");
             scan.installDir = entry.path().string();
             scan.installType = installType;
+            // WHAT WAS EXTRACTED HERE IS WHAT `main` RESOLVES AGAINST.
+            //
+            // A manifest's `main` is a per-variant map, and an installed module
+            // directory holds exactly ONE variant's files -- the one
+            // installPluginFile unpacked, which it records in the `variant`
+            // sidecar beside the manifest. Resolving against this host's native
+            // list instead answers "no main" for every package installed for
+            // anything else, and a package with no main is DROPPED by the
+            // callers that matter: liblogos' module discovery skips a row whose
+            // mainFilePath is empty, so the module is invisible with no error
+            // anywhere.
+            //
+            // That is not a hypothetical mismatch. A Store shell installs the
+            // `web` variant it declared (setInstallVariants, below) precisely
+            // because it is NOT the variant this host loads natively -- a phone
+            // may not download native code (ADR 0003) -- and the Web container
+            // that runs it is a core container, so the core has to find it in a
+            // modules directory. Measured on an iPad simulator, 2026-09-13: the
+            // install succeeded, the files landed in the directory the core
+            // scans, and the module never appeared.
+            //
+            // The native list stays the fallback, for embedded and legacy
+            // installs that record no variant at all.
+            //
             // Resolved before manifestBytes is moved from, below. Reported
             // against entry.path(), NOT the absolute path lgx_resolve_main
             // returns: installDir inherits the caller's form, and the two must
             // agree so a relative --modules-dir does not yield one of each.
+            const std::string installedVariant = readInstalledVariant(entry.path());
             {
-                const ResolvedMain m = resolveMain(entry.path(), *manifestBytes, variants);
+                // The recorded name AND its build-suffix-free form: the sidecar
+                // records what was unpacked, and a `-dev` build writes a
+                // directory the published manifest spells without the suffix.
+                // With nothing recorded, this host's native list is the
+                // fallback.
+                std::vector<std::string> mainVariants;
+                if (installedVariant.empty()) {
+                    mainVariants = variants;
+                } else {
+                    mainVariants.push_back(installedVariant);
+                    const std::string bare = variantWithoutDevSuffix(installedVariant);
+                    if (bare != installedVariant)
+                        mainVariants.push_back(bare);
+                }
+                const ResolvedMain m = resolveMain(entry.path(), *manifestBytes, mainVariants);
                 if (m.state == LGX_MAIN_RESOLVED)
                     scan.mainFilePath = (entry.path() / m.declaredPath).string();
             }
@@ -848,8 +887,16 @@ static std::map<std::string, ScanEntry> enumerateManifests(
             // affected module (naming the installed variant, the supported list,
             // and the directory) so the cause is greppable. Modules without a
             // variant file (embedded / legacy installs) are left untouched.
-            std::string installedVariant = readInstalledVariant(entry.path());
+            // `web` is exempt, and for the reason the block above exists: it is
+            // not a native image and this library cannot say whether it runs.
+            // Whether it does depends on the host having registered a Web
+            // container, which is a RUNTIME fact no compiled-in platform list
+            // knows -- and installPluginFile routes a `web` variant into the
+            // modules directory exactly so a core container can find it. Warning
+            // there would tell a Store shell its one installable variant will
+            // not load, every time it scans.
             if (!installedVariant.empty() &&
+                variantWithoutDevSuffix(installedVariant) != "web" &&
                 std::find(variants.begin(), variants.end(), installedVariant) == variants.end()) {
                 std::cerr << "Warning: module '" << name << "' in " << entry.path().string()
                           << " was installed for variant '" << installedVariant
