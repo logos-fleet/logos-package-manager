@@ -504,3 +504,161 @@ TEST_F(VariantInstallTest, AMobileHostRefusesAForeignTargetAndNamesWhatThePackag
         EXPECT_FALSE(fs::exists(uiPluginsDir / c.pkg));
     }
 }
+
+// =============================================================================
+// A Store shell installs the CONTAINER's variant, not the loader's
+//
+// Everything above is about the variant a host LOADS: one native image, chosen
+// by the platform it is running on, and `NoNativeHostReachesForTheWebVariant`
+// pins that no host reaches past it on its own. That rule has to stay -- a host
+// that silently selected a web payload would install JavaScript where it opens
+// a plugin.
+//
+// A Store shell is the case it does not cover. Its native variant arrived in
+// the app image at BUILD time and a phone may not download native code (ADR
+// 0003), so the only thing it installs at run time is a `web` variant, into the
+// Web container. That is a DECLARATION the embedder makes -- setInstallVariants
+// -- and never an inference, which is the same shape the cross-build override
+// already has next door.
+// =============================================================================
+
+class WebVariantInstallTest : public VariantInstallTest {
+protected:
+    /**
+     * A real .lgx whose only variant is `web`: the directory
+     * logos-module-builder emits for a ui_qml module's web variant -- a
+     * manifest, an entry document and the files beside it, and NO library at
+     * all. The bytes are a stand-in; the layout is the contract.
+     */
+    fs::path createWebPackage(const std::string& name) {
+        fs::path lgxPath = tempDir / (name + ".lgx");
+        fs::path contentDir = tempDir / (name + "_web_content");
+        fs::create_directories(contentDir / "view");
+        { std::ofstream f(contentDir / "index.html");  f << "<!doctype html><title>ui</title>"; }
+        { std::ofstream f(contentDir / "host.html");   f << "<!doctype html><title>headless</title>"; }
+        { std::ofstream f(contentDir / "view" / "Counter.qml"); f << "import QtQuick\nItem {}\n"; }
+        {
+            std::ofstream mf(contentDir / "manifest.json");
+            mf << "{\n  \"name\": \"" << name << "\",\n"
+               << "  \"version\": \"1.0.0\",\n"
+               << "  \"type\": \"ui_qml\",\n"
+               << "  \"logos_web_runtime\": \"qml\",\n"
+               << "  \"main\": \"index.html\",\n"
+               << "  \"category\": \"test\"\n}";
+        }
+
+        lgx_result_t res = lgx_create(lgxPath.string().c_str(), name.c_str());
+        if (!res.success) return {};
+        lgx_package_t pkg = lgx_load(lgxPath.string().c_str());
+        if (!pkg) return {};
+        res = lgx_add_variant(pkg, "web", contentDir.string().c_str(), "index.html");
+        if (!res.success) { lgx_free_package(pkg); return {}; }
+        res = lgx_save(pkg, lgxPath.string().c_str());
+        lgx_free_package(pkg);
+        if (!res.success) return {};
+        return lgxPath;
+    }
+};
+
+TEST_F(WebVariantInstallTest, AStoreShellInstallsTheWebVariantItDeclared) {
+    auto lgxPath = createWebPackage("web_counter");
+    ASSERT_FALSE(lgxPath.empty());
+
+    ScopedPlatformOverride host("ios-sim-arm64");
+    auto pm = createPM();
+    pm.setInstallVariants({ "web" });
+
+    std::string errorMsg;
+    std::string result = pm.installPluginFile(lgxPath.string(), errorMsg);
+    ASSERT_FALSE(result.empty()) << errorMsg;
+    EXPECT_TRUE(fs::exists(modulesDir / "web_counter" / "manifest.json")) << result;
+    EXPECT_TRUE(fs::exists(modulesDir / "web_counter" / "index.html")) << result;
+    EXPECT_TRUE(fs::exists(modulesDir / "web_counter" / "view" / "Counter.qml")) << result;
+}
+
+TEST_F(WebVariantInstallTest, AWebVariantIsTheCoresToDiscoverWhateverItsType) {
+    // `type: ui_qml` routes a DESKTOP package to the ui-plugins directory,
+    // where a Qt plugin is loaded by the shell. A `web` variant is not that
+    // package: the Web container is a CORE container, so the core discovers it
+    // in a modules directory or it is never loaded at all. Routing it by type
+    // would install it somewhere nothing scans and report success.
+    auto lgxPath = createWebPackage("web_counter_typed");
+    ASSERT_FALSE(lgxPath.empty());
+
+    ScopedPlatformOverride host("ios-sim-arm64");
+    auto pm = createPM();
+    pm.setInstallVariants({ "web" });
+
+    std::string errorMsg;
+    bool isCoreModule = false;
+    std::string installedPath;
+    std::string result =
+        pm.installPluginFile(lgxPath.string(), errorMsg, false, &installedPath, &isCoreModule);
+    ASSERT_FALSE(result.empty()) << errorMsg;
+    EXPECT_TRUE(isCoreModule);
+    EXPECT_EQ(result, modulesDir.string());
+    EXPECT_FALSE(fs::exists(uiPluginsDir / "web_counter_typed"));
+    // ...and what it reports is inside what it installed. The exact leaf is the
+    // ROOT manifest's business (see installedDirOf in test_signer_identity.cpp:
+    // the C API has no lgx_set_type, so a fixture's root manifest is thinner
+    // than a published package's), and this is about WHERE, not which file.
+    ASSERT_FALSE(installedPath.empty());
+    EXPECT_EQ(installedPath.rfind((modulesDir / "web_counter_typed").string(), 0), 0u)
+        << installedPath;
+}
+
+TEST_F(WebVariantInstallTest, WithoutTheDeclarationAWebPackageIsStillRefused) {
+    // The default is unchanged and stays unchanged: a host that did not say it
+    // has a container does not get one.
+    auto lgxPath = createWebPackage("web_undeclared");
+    ASSERT_FALSE(lgxPath.empty());
+
+    ScopedPlatformOverride host("ios-sim-arm64");
+    auto pm = createPM();
+
+    std::string errorMsg;
+    std::string result = pm.installPluginFile(lgxPath.string(), errorMsg);
+    EXPECT_TRUE(result.empty()) << "a web payload installed on a host with no container";
+    EXPECT_NE(errorMsg.find("variant"), std::string::npos) << errorMsg;
+    EXPECT_FALSE(fs::exists(modulesDir / "web_undeclared"));
+    EXPECT_FALSE(fs::exists(uiPluginsDir / "web_undeclared"));
+}
+
+TEST_F(WebVariantInstallTest, DeclaringWebDoesNotAdmitANativePackage) {
+    // The declaration REPLACES the accept list rather than widening it. A Store
+    // shell that installed a darwin-arm64 payload because it happened to be on
+    // a Mac would be downloading native code, which is the one thing ADR 0003
+    // says it may not do.
+    auto lgxPath = createPackageAsProducedBy("native_on_shell", "darwin-arm64");
+    ASSERT_FALSE(lgxPath.empty());
+
+    ScopedPlatformOverride host("darwin-arm64");
+    auto pm = createPM();
+    pm.setInstallVariants({ "web" });
+
+    std::string errorMsg;
+    std::string result = pm.installPluginFile(lgxPath.string(), errorMsg);
+    EXPECT_TRUE(result.empty()) << "a native payload installed into a web-only shell";
+    EXPECT_NE(errorMsg.find("variant"), std::string::npos) << errorMsg;
+    EXPECT_FALSE(fs::exists(modulesDir / "native_on_shell"));
+}
+
+TEST_F(WebVariantInstallTest, AnEmptyDeclarationRestoresTheHostsOwnVariant) {
+    // Symmetrical with setPlatformVariantOverride(""): the declaration is
+    // revocable, and revoking it is not the same as declaring nothing is
+    // installable.
+    auto lgxPath = createPackageAsProducedBy("back_to_native", "darwin-arm64");
+    ASSERT_FALSE(lgxPath.empty());
+
+    ScopedPlatformOverride host("darwin-arm64");
+    auto pm = createPM();
+    pm.setInstallVariants({ "web" });
+    pm.setInstallVariants({ });
+
+    std::string errorMsg;
+    std::string result = pm.installPluginFile(lgxPath.string(), errorMsg);
+    ASSERT_FALSE(result.empty()) << errorMsg;
+    // installPluginFile returns the root it installed INTO; which of the two
+    // that is depends on the fixture's root manifest, not on this test.
+    EXPECT_TRUE(fs::exists(fs::path(result) / "back_to_native")) << result;
+}

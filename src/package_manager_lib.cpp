@@ -276,6 +276,22 @@ std::vector<std::string> PackageManagerLib::allDirectories() const
     return dirs;
 }
 
+namespace {
+
+// "web-dev" -> "web". A build variant's "-dev" suffix is this binary's own
+// contract (see platformVariantsToTry), so a variant name is compared without
+// it wherever the comparison is about WHICH TARGET rather than which build.
+std::string variantWithoutDevSuffix(const std::string& variant)
+{
+    static const std::string kDev = "-dev";
+    if (variant.size() > kDev.size()
+        && variant.compare(variant.size() - kDev.size(), kDev.size(), kDev) == 0)
+        return variant.substr(0, variant.size() - kDev.size());
+    return variant;
+}
+
+} // namespace
+
 std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, std::string& errorMsg,
                                                   bool skipIfNotNewerVersion,
                                                   std::string* installedPluginPath,
@@ -439,8 +455,11 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
         return {};
     }
 
-    // Auto-detect module type from manifest.json in the extracted variant directory
-    auto variants = platformVariantsToTry();
+    // Auto-detect module type from manifest.json in the extracted variant
+    // directory. The INSTALL list, not the loader's: a Store shell installs the
+    // variant it declared (setInstallVariants) and looking for its own native
+    // one would miss the only directory in the package.
+    auto variants = installVariantsToTry();
     std::string variantDir;
     for (const auto& v : variants) {
         fs::path candidate = fs::path(tempDir) / v;
@@ -465,7 +484,19 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
             }
         }
     }
-    bool isCoreModule = (detectedType == "core");
+    // WHICH VARIANT WAS SELECTED, because for one of them the type does not
+    // decide where this goes. `type: ui_qml` sends a DESKTOP package to the
+    // ui-plugins directory, where a shell loads a Qt plugin out of it. A `web`
+    // variant of the same package is not that thing: it is served into the Web
+    // container, which is a CORE container, so the core has to DISCOVER it in a
+    // modules directory or it is never loaded at all. Routed by type it would
+    // install into a directory nothing scans and report success -- the same
+    // silent shape as an install directory the core does not scan.
+    const std::string selectedVariant =
+        variantDir.empty() ? std::string{} : fs::path(variantDir).filename().string();
+    const bool isWebVariant = variantWithoutDevSuffix(selectedVariant) == "web";
+
+    bool isCoreModule = (detectedType == "core") || isWebVariant;
     if (isCoreModuleOut)
         *isCoreModuleOut = isCoreModule;
 
@@ -507,7 +538,7 @@ std::string PackageManagerLib::installPluginFile(const std::string& pluginPath, 
     if (installedPluginPath) {
         *installedPluginPath = resolveInstalledPackagePath(
             (fs::path(installDir) / installedModuleName).string(),
-            platformVariantsToTry());
+            installVariantsToTry());
     }
 
     removeTreeQuietly(tempDir);
@@ -1433,6 +1464,37 @@ std::vector<std::string> PackageManagerLib::platformVariantsToTry()
     return variants;
 }
 
+void PackageManagerLib::setInstallVariants(const std::vector<std::string>& variants)
+{
+    m_installVariants = variants;
+}
+
+std::vector<std::string> PackageManagerLib::installVariantsToTry() const
+{
+    // No declaration: this host installs what it loads, which is every caller
+    // that is not a Store shell.
+    if (m_installVariants.empty())
+        return platformVariantsToTry();
+
+    // Expanded through liblgx's spellings for the same reason the loader's list
+    // is: the vocabulary belongs to logos-package, which writes these names into
+    // the signed hash tree, and a second table here would be a second answer.
+    // A variant liblgx has no aliases for still names itself, so nothing is
+    // lost by a declaration it has never heard of.
+    std::vector<std::string> variants;
+    for (const std::string& declared : m_installVariants) {
+        const char** spellings = lgx_variant_spellings(declared.c_str());
+        if (!spellings) {
+            variants.push_back(declared);
+            continue;
+        }
+        for (const char** sp = spellings; *sp != nullptr; ++sp)
+            variants.emplace_back(*sp);
+        lgx_free_string_array(spellings);
+    }
+    return variants;
+}
+
 bool PackageManagerLib::isValidModuleName(const std::string& name)
 {
     // A module name becomes a single directory component under the install
@@ -1514,7 +1576,10 @@ bool PackageManagerLib::extractLgxPackage(const std::string& lgxPath, const std:
         return false;
     }
 
-    auto variants = platformVariantsToTry();
+    // The INSTALL list: this is the gate a Store shell's `web` variant has to
+    // pass, and it is the FIRST one -- reached before anything is extracted, so
+    // a declaration honoured only below here would never see a directory.
+    auto variants = installVariantsToTry();
     std::string matchedVariant;
 
     for (const auto& v : variants) {
@@ -1660,7 +1725,7 @@ SignatureVerificationResult PackageManagerLib::verifyPackageSignature(const std:
 bool PackageManagerLib::copyLibraryFromExtracted(const std::string& extractedDir, const std::string& targetDir,
                                                   bool /* isCoreModule */, std::string& outModuleName, std::string& errorMsg)
 {
-    auto variants = platformVariantsToTry();
+    auto variants = installVariantsToTry();
     std::string variantDir;
 
     for (const auto& v : variants) {
