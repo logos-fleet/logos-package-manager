@@ -392,6 +392,33 @@ public:
     static std::string currentPlatformVariant();
     static std::vector<std::string> platformVariantsToTry();
 
+    // WHAT THIS INSTALL SELECTS OUT OF A PACKAGE, when that is not the variant
+    // this host LOADS.
+    //
+    // platformVariantsToTry() is the loader's answer, and it must stay the
+    // loader's: a host that reached past its own image on its own would install
+    // a web payload where it opens a plugin (see the `web` rows in
+    // tests/test_variant.cpp). A Store shell is the case that is not covered by
+    // it -- its native variant arrived in the app image at BUILD time and a
+    // phone may not download native code (ADR 0003), so the only thing it
+    // installs at run time is a `web` variant, into the Web container.
+    //
+    // So the embedder DECLARES it, exactly as the cross-build override above is
+    // declared and never inferred. Each entry is expanded through liblgx's
+    // spellings, so a declaration of "web" accepts every alias liblgx gives it.
+    // An EMPTY list restores this host's own variant; it does not mean "install
+    // nothing".
+    //
+    // Per instance rather than process-wide: the override next door is a
+    // cross-BUILD tool's answer for one lgpm invocation, while this is a
+    // property of the shell holding the library.
+    void setInstallVariants(const std::vector<std::string>& variants);
+    // The declaration as given, before expansion. Empty when none was made.
+    std::vector<std::string> declaredInstallVariants() const { return m_installVariants; }
+    // What installPluginFile() actually looks for, expanded: the declaration
+    // when there is one, and platformVariantsToTry() when there is not.
+    std::vector<std::string> installVariantsToTry() const;
+
     // Signature policy configuration
     void setSignaturePolicy(SignaturePolicy policy);
     SignaturePolicy signaturePolicy() const { return m_signaturePolicy; }
@@ -423,6 +450,8 @@ private:
     std::string m_userModulesDir;
     std::vector<std::string> m_embeddedUiPluginsDirs;
     std::string m_userUiPluginsDir;
+    // Empty = this host's own; see setInstallVariants().
+    std::vector<std::string> m_installVariants;
     SignaturePolicy m_signaturePolicy = SignaturePolicy::WARN;
     // Build-wide default; see UnknownSignerPolicy.
     UnknownSignerPolicy m_unknownSignerPolicy = UnknownSignerPolicy::Lenient;
